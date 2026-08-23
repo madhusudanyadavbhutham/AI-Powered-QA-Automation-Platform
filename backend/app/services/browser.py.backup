@@ -1,0 +1,236 @@
+from datetime import datetime
+
+from playwright.sync_api import sync_playwright
+
+
+def discover_application(url: str) -> dict:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        try:
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+
+            # --------------------------------
+            # INPUT DETAILS
+            # --------------------------------
+            inputs = page.locator("input")
+
+            input_details = []
+
+            for i in range(min(inputs.count(), 50)):
+                element = inputs.nth(i)
+
+                input_details.append(
+                    {
+                        "type": element.get_attribute("type"),
+                        "id": element.get_attribute("id"),
+                        "name": element.get_attribute("name"),
+                        "placeholder": element.get_attribute(
+                            "placeholder"
+                        ),
+                        "aria_label": element.get_attribute(
+                            "aria-label"
+                        ),
+                    }
+                )
+
+            # --------------------------------
+            # BUTTON DETAILS
+            # --------------------------------
+            buttons = page.locator("button")
+
+            button_details = []
+
+            for i in range(min(buttons.count(), 50)):
+                element = buttons.nth(i)
+
+                button_details.append(
+                    {
+                        "text": element.inner_text().strip(),
+                        "id": element.get_attribute("id"),
+                        "type": element.get_attribute("type"),
+                        "aria_label": element.get_attribute(
+                            "aria-label"
+                        ),
+                    }
+                )
+
+            # --------------------------------
+            # LINK DETAILS
+            # --------------------------------
+            links = page.locator("a")
+
+            link_details = []
+
+            for i in range(min(links.count(), 50)):
+                element = links.nth(i)
+
+                link_details.append(
+                    {
+                        "text": element.inner_text().strip(),
+                        "href": element.get_attribute("href"),
+                        "id": element.get_attribute("id"),
+                        "aria_label": element.get_attribute(
+                            "aria-label"
+                        ),
+                    }
+                )
+
+            return {
+                "title": page.title(),
+                "url": page.url,
+                "links": links.all_inner_texts()[:50],
+                "buttons": buttons.all_inner_texts()[:50],
+                "input_count": inputs.count(),
+                "inputs": input_details,
+                "button_details": button_details,
+                "link_details": link_details,
+            }
+
+        finally:
+            browser.close()
+
+def execute_steps(url: str, steps: list, run_id: int) -> list[dict]:
+    results = []
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+
+        try:
+            page.goto(
+                url,
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+
+            for step in steps:
+                step_started_at = datetime.utcnow()
+
+                try:
+                    action = step.action.lower()
+
+                    if action == "open":
+                        page.goto(
+                            step.target or url,
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+
+                    elif action == "type":
+                        if not step.target:
+                            raise ValueError(
+                                "type action requires target"
+                            )
+
+                        if step.value is None:
+                            raise ValueError(
+                                "type action requires value"
+                            )
+
+                        page.locator(step.target).fill(step.value)
+
+                    elif action == "click":
+                        if not step.target:
+                            raise ValueError(
+                                "click action requires target"
+                            )
+
+                        page.locator(step.target).click()
+
+                    elif action == "verify":
+                        if not step.target:
+                            raise ValueError(
+                                "verify action requires target"
+                            )
+
+                        page.locator(step.target).wait_for(
+                            state="visible",
+                            timeout=10000,
+                        )
+
+                    else:
+                        raise ValueError(
+                            f"Unsupported action: {step.action}"
+                        )
+
+                    finished_at = datetime.utcnow()
+
+                    duration_ms = int(
+                        (
+                            finished_at - step_started_at
+                        ).total_seconds()
+                        * 1000
+                    )
+
+                    screenshot_path = (
+                        f"screenshots/"
+                        f"run_{run_id}_step_{step.step_number}.png"
+                    )
+
+                    page.screenshot(
+                        path=screenshot_path,
+                        full_page=True,
+                    )
+
+                    results.append(
+                        {
+                            "step_id": step.id,
+                            "status": "passed",
+                            "message": (
+                                step.expected_result
+                                or "Step passed"
+                            ),
+                            "started_at": step_started_at,
+                            "finished_at": finished_at,
+                            "duration_ms": duration_ms,
+                            "screenshot_path": screenshot_path,
+                        }
+                    )
+
+                except Exception as exc:
+                    finished_at = datetime.utcnow()
+
+                    duration_ms = int(
+                        (
+                            finished_at - step_started_at
+                        ).total_seconds()
+                        * 1000
+                    )
+
+                    screenshot_path = (
+                        f"screenshots/"
+                        f"run_{run_id}_step_{step.step_number}.png"
+                    )
+
+                    try:
+                        page.screenshot(
+                            path=screenshot_path,
+                            full_page=True,
+                        )
+                    except Exception:
+                        screenshot_path = None
+
+                    results.append(
+                        {
+                            "step_id": step.id,
+                            "status": "failed",
+                            "message": str(exc),
+                            "started_at": step_started_at,
+                            "finished_at": finished_at,
+                            "duration_ms": duration_ms,
+                            "screenshot_path": screenshot_path,
+                        }
+                    )
+
+                    break
+
+        finally:
+            browser.close()
+
+    return results

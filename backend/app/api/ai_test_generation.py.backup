@@ -1,0 +1,358 @@
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models.application import Application
+from app.services.browser import discover_application
+
+
+router = APIRouter(
+    prefix="/projects/{project_id}/applications/{application_id}/ai",
+    tags=["AI Test Generation"],
+)
+
+
+class AITestGenerationRequest(BaseModel):
+    requirement: str = Field(
+        min_length=10,
+        max_length=5000,
+    )
+
+
+class GeneratedTestStep(BaseModel):
+    step_number: int
+    action: str
+    description: str
+    target: str | None = None
+    value: str | None = None
+    expected_result: str | None = None
+
+
+class GeneratedTestCase(BaseModel):
+    name: str
+    description: str
+    priority: str
+    steps: list[GeneratedTestStep]
+
+
+class AITestGenerationResponse(BaseModel):
+    test_case: GeneratedTestCase
+
+
+def find_input_by_keyword(inputs: list[dict], keywords: list[str]):
+    """
+    Find the best matching input based on
+    id, placeholder, aria-label, or name.
+    """
+
+    for element in inputs:
+        searchable = " ".join(
+            str(element.get(field) or "").lower()
+            for field in [
+                "id",
+                "name",
+                "placeholder",
+                "aria_label",
+            ]
+        )
+
+        if any(keyword in searchable for keyword in keywords):
+            element_id = element.get("id")
+
+            if element_id:
+                return f"#{element_id}"
+
+    return None
+
+
+def find_link_by_keyword(links: list[dict], keywords: list[str]):
+    """
+    Find a link based on visible text or aria-label.
+    """
+
+    for element in links:
+        searchable = " ".join(
+            str(element.get(field) or "").lower()
+            for field in [
+                "text",
+                "aria_label",
+            ]
+        )
+
+        if any(keyword in searchable for keyword in keywords):
+            element_id = element.get("id")
+
+            if element_id:
+                return f"#{element_id}"
+
+            href = element.get("href")
+
+            if href:
+                return f'a[href="{href}"]'
+
+    return None
+
+
+@router.post(
+    "/generate-test",
+    response_model=AITestGenerationResponse,
+)
+def generate_test(
+    project_id: int,
+    application_id: int,
+    data: AITestGenerationRequest,
+    db: Session = Depends(get_db),
+):
+    # ---------------------------------------------
+    # Validate application
+    # ---------------------------------------------
+
+    application = (
+        db.query(Application)
+        .filter(
+            Application.id == application_id,
+            Application.project_id == project_id,
+        )
+        .first()
+    )
+
+    if not application:
+        raise HTTPException(
+            status_code=404,
+            detail="Application not found",
+        )
+
+    # ---------------------------------------------
+    # Discover application
+    # ---------------------------------------------
+
+    try:
+        discovery = discover_application(
+            application.url
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Application discovery failed: {exc}",
+        )
+
+    inputs = discovery.get("inputs", [])
+    links = discovery.get("link_details", [])
+
+    requirement = data.requirement.lower()
+
+    # ---------------------------------------------
+    # SEARCH TEST
+    # ---------------------------------------------
+
+    if "search" in requirement:
+
+        search_selector = find_input_by_keyword(
+            inputs,
+            [
+                "search",
+                "query",
+            ],
+        )
+
+        if search_selector:
+            generated = GeneratedTestCase(
+                name="Search Application",
+                description=(
+                    "Verify that a user can search "
+                    "the application."
+                ),
+                priority="medium",
+                steps=[
+                    GeneratedTestStep(
+                        step_number=1,
+                        action="open",
+                        description="Open the application",
+                        target=application.url,
+                        expected_result=(
+                            "The application is displayed"
+                        ),
+                    ),
+                    GeneratedTestStep(
+                        step_number=2,
+                        action="type",
+                        description="Enter the search term",
+                        target=search_selector,
+                        value="Python",
+                        expected_result=(
+                            "Search term is entered"
+                        ),
+                    ),
+                ],
+            )
+
+        else:
+            generated = GeneratedTestCase(
+                name="Search Test",
+                description=(
+                    "A search field could not be "
+                    "identified during discovery."
+                ),
+                priority="medium",
+                steps=[
+                    GeneratedTestStep(
+                        step_number=1,
+                        action="open",
+                        description="Open the application",
+                        target=application.url,
+                        expected_result=(
+                            "The application is displayed"
+                        ),
+                    )
+                ],
+            )
+
+    # ---------------------------------------------
+    # LOGIN TEST
+    # ---------------------------------------------
+
+    elif (
+        "login" in requirement
+        or "log in" in requirement
+        or "sign in" in requirement
+    ):
+
+        username_selector = find_input_by_keyword(
+            inputs,
+            [
+                "username",
+                "user",
+                "email",
+                "login",
+            ],
+        )
+
+        password_selector = find_input_by_keyword(
+            inputs,
+            [
+                "password",
+                "pass",
+            ],
+        )
+
+        login_link = find_link_by_keyword(
+            links,
+            [
+                "login",
+                "log in",
+                "sign in",
+            ],
+        )
+
+        # -----------------------------------------
+        # Login elements found
+        # -----------------------------------------
+
+        if username_selector and password_selector:
+
+            generated = GeneratedTestCase(
+                name="Successful Login",
+                description=(
+                    "Verify that a user can successfully "
+                    "log in with valid credentials."
+                ),
+                priority="high",
+                steps=[
+                    GeneratedTestStep(
+                        step_number=1,
+                        action="open",
+                        description="Open the application",
+                        target=application.url,
+                        expected_result=(
+                            "The application is displayed"
+                        ),
+                    ),
+                    GeneratedTestStep(
+                        step_number=2,
+                        action="type",
+                        description="Enter the username",
+                        target=username_selector,
+                        value="demo_user",
+                        expected_result=(
+                            "Username is entered"
+                        ),
+                    ),
+                    GeneratedTestStep(
+                        step_number=3,
+                        action="type",
+                        description="Enter the password",
+                        target=password_selector,
+                        value="demo_password",
+                        expected_result=(
+                            "Password is entered"
+                        ),
+                    ),
+                ],
+            )
+
+            if login_link:
+                generated.steps.append(
+                    GeneratedTestStep(
+                        step_number=4,
+                        action="click",
+                        description="Submit the login form",
+                        target=login_link,
+                        expected_result=(
+                            "Login request is submitted"
+                        ),
+                    )
+                )
+
+        # -----------------------------------------
+        # Login elements NOT found
+        # -----------------------------------------
+
+        else:
+
+            generated = GeneratedTestCase(
+                name="Login Test",
+                description=(
+                    "A login form could not be identified "
+                    "on the discovered application page."
+                ),
+                priority="medium",
+                steps=[
+                    GeneratedTestStep(
+                        step_number=1,
+                        action="open",
+                        description="Open the application",
+                        target=application.url,
+                        expected_result=(
+                            "The application is displayed"
+                        ),
+                    )
+                ],
+            )
+
+    # ---------------------------------------------
+    # GENERIC TEST
+    # ---------------------------------------------
+
+    else:
+
+        generated = GeneratedTestCase(
+            name="Generated Test Case",
+            description=data.requirement,
+            priority="medium",
+            steps=[
+                GeneratedTestStep(
+                    step_number=1,
+                    action="open",
+                    description="Open the application",
+                    target=application.url,
+                    expected_result=(
+                        "Application is displayed"
+                    ),
+                )
+            ],
+        )
+
+    return AITestGenerationResponse(
+        test_case=generated
+    )
